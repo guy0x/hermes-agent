@@ -92,3 +92,57 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
 
 
 
+
+
+def test_decompose_children_carry_lineage_header(kanban_home):
+    """2026-09-28 paper-trail audit fix: every decomposed child body must open
+    with a [Context] lineage header naming the root card, its title, the
+    creator session id, and the authoring profile — even when the fan-out
+    declares no sibling parents edges (the 54%-orphaned case)."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="root spec",
+            session_id="20260928_101915_6aeb00",
+            triage=True,
+        )
+    children = [
+        {"title": "orphan-ish child", "body": "do the work", "assignee": "researcher"},
+        {"title": "no-body child", "assignee": "engineer"},  # body-less input
+    ]
+    with kbc.connect() as conn:
+        child_ids = decompose_triage_task(
+            conn, tid, root_assignee="orch",
+            children=children, author="decomposer",
+        )
+    assert child_ids is not None
+    with kbc.connect() as conn:
+        c0, c1 = (kb.get_task(conn, cid) for cid in child_ids)
+
+    for child in (c0, c1):
+        assert child.body.startswith("[Context] decomposed from "), child.body[:80]
+        assert f'decomposed from {tid} "root spec"' in child.body
+        assert "session 20260928_101915_6aeb00" in child.body
+        assert "author decomposer" in child.body
+    # Original work spec survives the header.
+    assert "do the work" in c0.body
+    # A body-less child input yields header-only, not None/empty.
+    assert c1.body and c1.body.strip() != ""
+
+
+def test_decompose_lineage_header_omits_missing_optional_fields(kanban_home):
+    """No session stamp and no author → header still forms, without empty
+    'session None' / 'author None' fragments."""
+    with kbc.connect() as conn:
+        tid = _create_triage(conn, title="bare root")
+    with kbc.connect() as conn:
+        child_ids = decompose_triage_task(
+            conn, tid, root_assignee="orch",
+            children=[{"title": "solo", "body": "work"}], author=None,
+        )
+    assert child_ids is not None
+    with kbc.connect() as conn:
+        body = kb.get_task(conn, child_ids[0]).body
+    assert body.startswith("[Context] decomposed from ")
+    assert "session" not in body
+    assert "author" not in body
+    assert "work" in body

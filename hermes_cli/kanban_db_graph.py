@@ -115,7 +115,7 @@ def decompose_triage_task(
     now = int(time.time())
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, title, status, tenant, workspace_kind, workspace_path, session_id "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
@@ -166,6 +166,30 @@ def decompose_triage_task(
     return child_ids
 
 
+def _child_body_with_lineage(
+    child: dict, root_id: str, root_row: sqlite3.Row, author: Optional[str],
+) -> str:
+    """Prepend a one-line paper-trail header to a decomposed child body.
+
+    Fan-out children previously inherited the decomposer's body verbatim, and
+    most fan-outs declare no sibling ``parents`` edges — so the majority of
+    children carried zero discoverable lineage (2026-09-28 audit: 54% of
+    fanned children had no parent link, 11% named any card id). The header
+    bakes the context into the body itself: the root card id (with title for
+    grep-ability), the creator session id, and the authoring profile.
+    """
+    sid = (root_row["session_id"] or "").strip() if "session_id" in root_row.keys() else ""
+    parts = [f'decomposed from {root_id} "{root_row["title"]}"']
+    if sid:
+        parts.append(f"session {sid}")
+    if author and author.strip():
+        parts.append(f"author {author.strip()}")
+    header = f"[Context] {parts[0]}" + "".join(f" · {p}" for p in parts[1:])
+    body = child.get("body")
+    body = body if isinstance(body, str) else ""
+    return f"{header}\n\n{body}" if body.strip() else header
+
+
 def _insert_decomposed_child(
     conn: sqlite3.Connection, root_id: str, root_row: sqlite3.Row, child: dict,
     author: Optional[str], now: int,
@@ -195,14 +219,13 @@ def _insert_decomposed_child(
     else:
         child_ws_path = None
     new_id = _new_task_id()
-    body = child.get("body")
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
         " workspace_path, tenant, created_at, created_by) "
         "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
         (
-            new_id, child["title"].strip(), body if isinstance(body, str) else None,
+            new_id, child["title"].strip(), _child_body_with_lineage(child, root_id, root_row, author),
             _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
             root_row["tenant"], now, (author or "decomposer"),
         ),
