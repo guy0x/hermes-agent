@@ -160,6 +160,12 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_SESSION_KEY",
     "HERMES_GATEWAY_SESSION",
     "HERMES_CRON_SESSION",
+    # Same fail-closed family as cron/gateway: `chat -q` and single-query agent
+    # workers (kanban/cron) export this marker, and pytest routinely launches
+    # from one. Without blanking, the approval guard resolves an unattended
+    # single-query context and deny-mode config blocks every test that runs
+    # the real execute_code tool (#tests/cron/test_timezone.py etc.).
+    "HERMES_SINGLE_QUERY_SESSION",
     "_HERMES_GATEWAY",
     "HERMES_PLATFORM",
     "HERMES_MODEL",

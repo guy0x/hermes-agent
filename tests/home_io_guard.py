@@ -31,6 +31,18 @@ _INTERPRETER_PREFIXES = tuple({
 _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
 
+# The sealed-payload manifest PM writes beside a checkout (``<payload>/manifest.json``,
+# i.e. one level ABOVE the checkout root). ``hermes_bootstrap`` -> ``pm.environments``
+# probes it with a plain read on every entry-point import (``_payload_manifest``), so a
+# test that first-imports an entry-point module inside its body — ``patch("run_agent...")``
+# is the common shape — triggers that read. On a default install the checkout lives INSIDE
+# the real home, so the probe points at ``<real home>/manifest.json`` and the guard refused
+# it. It is install metadata (absent reads as "not a payload"), not profile state, and it is
+# the sibling of a root the guard already allows. Reads only: any write mode still refuses.
+_PAYLOAD_MANIFEST_PATHS = frozenset({
+    _normcase(os.fspath(Path(__file__).resolve().parent.parent.parent / "manifest.json")),
+})
+
 
 def _within(path: str, prefix: str) -> bool:
     """``Path(path).is_relative_to(prefix)`` for two normalized, case-folded absolute strings."""
@@ -100,6 +112,11 @@ class HomeIOGuard:
             for prefix in _INTERPRETER_PREFIX_STRS:
                 if _within(absolute, prefix) or (metadata and _contains(absolute, prefix)):
                     return
+            # The sealed-payload manifest probe beside the checkout (see
+            # _PAYLOAD_MANIFEST_PATHS): install metadata read on entry-point import.
+            # Destructive ops still fall through to the refusal below.
+            if not destructive and absolute in _PAYLOAD_MANIFEST_PATHS:
+                return
             # Check the lexical path first: resolving must not probe a protected
             # tree merely to decide that the original path was forbidden.
             for root in roots:

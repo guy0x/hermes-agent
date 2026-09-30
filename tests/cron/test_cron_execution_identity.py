@@ -62,6 +62,14 @@ def test_tool_hook_in_a_ticked_job_sees_its_execution_and_none_outside(tmp_path)
                if not k.startswith(("HERMES_", "_HERMES_"))
                and not k.endswith(("_API_KEY", "_TOKEN"))}
         env.update(HERMES_HOME=str(home), PYTHONPATH=str(Path(__file__).resolve().parents[2]))
+        # The hermetic suite's kill-switch must survive the blanking above: without it,
+        # ``hermes_bootstrap``'s ``prepare_launch`` re-execs this child onto the host's PM
+        # store interpreter when the checkout is a self-managed install (the dependencies
+        # live in a separate activated environment), and the re-exec'd child cannot import
+        # the repo's third-party deps. Tests must run on this interpreter, not the install's.
+        env["HERMES_DISABLE_LAZY_INSTALLS"] = (
+            os.environ.get("HERMES_DISABLE_LAZY_INSTALLS") or "1"
+        )
         result = subprocess.run([sys.executable, "-c", _TICK], env=env, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stdout + result.stderr
