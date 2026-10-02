@@ -24,7 +24,7 @@ from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli.kanban_output import (
-    _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
+    _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _coerce_epoch, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
     _task_to_dict,
 )
@@ -558,8 +558,12 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print()
         print(f"Runs ({len(runs)}):")
         for r in runs:
+            # Coerce first: started_at/ended_at are ints in practice, but a producer
+            # that wrote an ISO-8601 string must not turn duration math into a TypeError.
+            started = _coerce_epoch(r.started_at)
+            ended = _coerce_epoch(r.ended_at)
             # Clamp to 0 so NTP backward-jumps don't print negative seconds.
-            elapsed = max(0, r.ended_at - r.started_at) if r.ended_at else None
+            elapsed = max(0, ended - started) if (ended is not None and started is not None) else None
             el = f"{elapsed}s" if elapsed is not None else "active"
             outcome = r.outcome or r.status or "active"
             print(f"  #{r.id:<3} {outcome:<12} @{r.profile or '-'}  {el}  {_fmt_ts(r.started_at)}")
@@ -1229,9 +1233,10 @@ def _cmd_runs(args: argparse.Namespace) -> int:
         return 0
     print(f"{'#':3s}  {'OUTCOME':12s}  {'PROFILE':16s}  {'ELAPSED':>8s}  STARTED")
     for i, r in enumerate(runs, 1):
-        end = r.ended_at or int(time.time())
+        started = _coerce_epoch(r.started_at)
+        end = _coerce_epoch(r.ended_at) or int(time.time())
         # Clamp to 0 so NTP backward-jumps don't print negative durations.
-        elapsed = max(0, end - r.started_at)
+        elapsed = max(0, end - started) if started is not None else 0
         el = f"{elapsed}s" if elapsed < 60 else f"{elapsed // 60}m" if elapsed < 3600 else f"{elapsed / 3600:.1f}h"
         outcome = r.outcome or ("(running)" if not r.ended_at else r.status)
         print(f"{i:3d}  {outcome:12s}  {(r.profile or '-'):16s}  {el:>8s}  {_fmt_ts(r.started_at)}")
