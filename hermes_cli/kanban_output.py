@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
@@ -31,8 +32,37 @@ _RUNS_RUN_FIELDS = (
 _ATTACHMENT_FIELDS = ("id", "filename", "content_type", "size", "uploaded_by", "stored_path", "created_at")
 
 
-def _fmt_ts(ts: Optional[int]) -> str:
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else ""
+def _coerce_epoch(ts: Any) -> Optional[int]:
+    """Coerce a kanban timestamp to epoch seconds, or None when unset/blank.
+
+    Kanban rows normally carry epoch ints, but producers have written ISO-8601
+    strings (e.g. ``2026-09-23T10:07:10``) into ``*_at`` columns. The output
+    layer must format either without raising — that mixed-type assumption is
+    the bug class behind the ``hermes kanban show`` / ``runs`` crashes.
+    """
+    if ts is None or ts == "" or isinstance(ts, bool):
+        return None
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    if isinstance(ts, str):
+        s = ts.strip()
+        if not s:
+            return None
+        try:
+            return int(float(s))
+        except ValueError:
+            pass
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        return int(dt.timestamp())
+    return None
+
+
+def _fmt_ts(ts: Any) -> str:
+    epoch = _coerce_epoch(ts)
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch)) if epoch else ""
 
 
 def _print_json(obj: Any, *, ascii: bool = False) -> None:
