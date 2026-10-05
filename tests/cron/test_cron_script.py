@@ -363,6 +363,12 @@ class TestRunJobScript:
             "hermes_cli._launchers.resolve_store_python", lambda repo: Path(sys.executable)
         )
         monkeypatch.setattr("pm.environments.selected_venv", lambda repo: venv)
+        # A live checkout is NOT a sealed payload: stub the payload probe so
+        # build_subprocess_env's bin-dir resolution doesn't stat/read
+        # <checkout>/../manifest.json — which on a checkout nested inside the real
+        # home (~/.hermes/hermes-agent beside ~/.hermes) is a filesystem call inside
+        # the guarded home and trips tests/home_io_guard.py.
+        monkeypatch.setattr("pm.environments.payload_command_dir", lambda repo: None)
         monkeypatch.delenv("PYTHONPATH", raising=False)
 
         script = cron_env / "scripts" / "probe.py"

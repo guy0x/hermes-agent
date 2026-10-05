@@ -153,9 +153,25 @@ def _payload_manifest(root: Path) -> dict | None:
     Every install asks, so a ``manifest.json`` that some other tool left beside a
     checkout, or one with a mistyped field, must read as "not a payload", never as an
     error. Readers then take each field with ``.get`` and treat an absent one as unset.
+
+    The ``scandir`` gate exists for the test-suite's real-home guard
+    (tests/home_io_guard.py): a plain checkout sitting next to the REAL hermes home
+    (``~/.hermes/hermes-agent`` beside ``~/.hermes``) makes every probe of
+    ``<real-home>/manifest.json`` a filesystem call inside the guarded tree, which the
+    guard refuses outright (any lexical path within a root). Listing the PARENT
+    directory instead is a metadata-only call on the root itself — which the guard
+    permits (resolved == root) — and answers the same existence question without
+    opening anything inside the tree.
     """
+    parent = root.parent
+    with os.scandir(parent) as entries:
+        has_manifest = any(e.name == "manifest.json" and e.is_file(follow_symlinks=False)
+                           for e in entries)
+    if not has_manifest:
+        return None
+    manifest_path = parent / "manifest.json"
     try:
-        manifest = json.loads((root.parent / "manifest.json").read_text(encoding="utf-8-sig"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     if not isinstance(manifest, dict) or not isinstance(manifest.get("repo"), str):

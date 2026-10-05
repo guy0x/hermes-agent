@@ -404,11 +404,61 @@ def _build_children(
     task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
     live_deleg_id: Optional[str], live_writers: list, task_images: Optional[List[Optional[List[str]]]] = None,
+    allow_role_lanes: bool = False,
 ) -> tuple[List[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe);
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
+
+    # ── role→lane routing ──────────────────────────
+    # The 8-lane delegation.task_model_map has existed in config since before
+    # 2026-10-05 with ZERO consumers (delegation_pin_guard.py:73 documented it).
+    # Wire it: at ROOT depth (parent._delegate_depth == 0), a task whose role
+    # names a lane is built on that lane's {provider, model} pair. Depth >= 1
+    # children inherit the pin. credentials_cfg (internal routes like /review)
+    # still wins — lane lookup only applies to the configured-pin path.
+    #
+    # SAFETY LINE: a lane may carry ONLY {provider, model}. api_key/base_url in
+    # a lane is a configuration attack surface (it would hand a child arbitrary
+    # key material from a config file meant to hold routing, not secrets) and
+    # is refused loudly here, before any child exists.
+    task_lanes: List[Optional[Dict[str, Any]]] = [None] * len(task_list)
+    parent_depth = getattr(parent_agent, "_delegate_depth", 0)
+    lane_map = (routing_cfg or {}).get("task_model_map") or {}
+    if allow_role_lanes and parent_depth == 0 and lane_map and creds is not None:
+        for _i, _t in enumerate(task_list):
+            _lane_key = str(_t.get("role") or "").strip()
+            _lane = lane_map.get(_lane_key)
+            if not isinstance(_lane, dict):
+                continue
+            if "api_key" in _lane or "base_url" in _lane:
+                raise ValueError(
+                    f"task_model_map lane '{_lane_key}' carries "
+                    f"{[k for k in ('api_key', 'base_url') if k in _lane]} — "
+                    "lanes are {provider, model} pairs only; keys resolve from "
+                    "the provider's own key_env via _resolve_delegation_credentials"
+                )
+            _pair = (str(_lane.get("provider") or "").strip(),
+                     str(_lane.get("model") or "").strip())
+            if not _pair[0] or not _pair[1]:
+                continue
+            task_lanes[_i] = {"provider": _pair[0], "model": _pair[1]}
+
+    def _child_creds(i: int) -> Dict[str, Any]:
+        """Per-child credential view: the lane pair if selected, else the pin."""
+        lane = task_lanes[i]
+        if lane is None:
+            return creds
+        merged = dict(creds)
+        merged["provider"] = lane["provider"]
+        merged["model"] = lane["model"]
+        # The pin's key material must NOT leak onto a different provider —
+        # resolution for a lane pair happens by provider identity downstream.
+        merged["api_key"] = None
+        merged["base_url"] = None
+        return merged
+
     overrides = {
         "override_provider": creds["provider"], "override_base_url": creds["base_url"],
         "override_api_key": creds["api_key"], "override_api_mode": creds["api_mode"],
@@ -424,11 +474,22 @@ def _build_children(
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
         try:
+            _c = _child_creds(i)
+            if _c is creds:
+                _overrides = overrides
+            else:
+                # Lane child: pair swapped in, key/url deliberately cleared so
+                # the pin's key can never ride onto another provider. Child
+                # runtime resolution re-resolves the lane provider's own key.
+                _overrides = dict(overrides)
+                _overrides["override_provider"] = _c["provider"]
+                _overrides["override_api_key"] = None
+                _overrides["override_base_url"] = None
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
+                model=_c["model"], max_iterations=max_iterations, task_count=len(task_list),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **_overrides,
             )
         except ValueError as exc:
             return [], str(exc)
@@ -573,6 +634,10 @@ def delegate_task(
     children, err = _build_children(
         task_list, task_schemas, creds, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
         routing_cfg=routing_cfg, live_deleg_id=live_deleg_id, live_writers=live_writers, task_images=task_images,
+        # Role→lane routing runs on the configured-pin path only. When an internal
+        # caller owns the route (credentials_cfg, e.g. /review), the caller's
+        # route wins and lanes are inert.
+        allow_role_lanes=credentials_cfg is None,
     )
     if err:
         return tool_error(err)
